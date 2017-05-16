@@ -58,42 +58,6 @@ static void drop_capabilities_bounding_set_if_needed(struct minijail *j) {
     minijail_capbset_drop(j, CAP_TO_MASK(CAP_SETUID) | CAP_TO_MASK(CAP_SETGID));
 }
 
-static bool should_drop_privileges() {
-#if defined(ALLOW_ADBD_ROOT)
-    // The properties that affect `adb root` and `adb unroot` are ro.secure and
-    // ro.debuggable. In this context the names don't make the expected behavior
-    // particularly obvious.
-    //
-    // ro.debuggable:
-    //   Allowed to become root, but not necessarily the default. Set to 1 on
-    //   eng and userdebug builds.
-    //
-    // ro.secure:
-    //   Drop privileges by default. Set to 1 on userdebug and user builds.
-    bool ro_secure = android::base::GetBoolProperty("ro.secure", true);
-    bool ro_debuggable = __android_log_is_debuggable();
-
-    // Drop privileges if ro.secure is set...
-    bool drop = ro_secure;
-
-    // ... except "adb root" lets you keep privileges in a debuggable build.
-    std::string prop = android::base::GetProperty("service.adb.root", "");
-    bool adb_root = (prop == "1");
-    bool adb_unroot = (prop == "0");
-    if (ro_debuggable && adb_root) {
-        drop = false;
-    }
-    // ... and "adb unroot" lets you explicitly drop privileges.
-    if (adb_unroot) {
-        drop = true;
-    }
-
-    return drop;
-#else
-    return true; // "adb root" not allowed, always drop privileges.
-#endif // ALLOW_ADBD_ROOT
-}
-
 static void drop_privileges(int server_port) {
     ScopedMinijail jail(minijail_new());
 
@@ -112,33 +76,20 @@ static void drop_privileges(int server_port) {
                       AID_NET_BT,       AID_NET_BT_ADMIN, AID_SDCARD_R, AID_SDCARD_RW,
                       AID_NET_BW_STATS, AID_READPROC,     AID_UHID};
     minijail_set_supplementary_gids(jail.get(), arraysize(groups), groups);
+    // minijail_enter() will abort if any priv-dropping step fails.
+    // removed priv-dropping, but letting this stay here.
+    minijail_enter(jail.get());
 
-    // Don't listen on a port (default 5037) if running in secure mode.
-    // Don't run as root if running in secure mode.
-    if (should_drop_privileges()) {
-        drop_capabilities_bounding_set_if_needed(jail.get());
-
-        minijail_change_gid(jail.get(), AID_SHELL);
-        minijail_change_uid(jail.get(), AID_SHELL);
-        // minijail_enter() will abort if any priv-dropping step fails.
-        minijail_enter(jail.get());
-
-        D("Local port disabled");
-    } else {
-        // minijail_enter() will abort if any priv-dropping step fails.
-        minijail_enter(jail.get());
-
-        if (root_seclabel != nullptr) {
-            if (selinux_android_setcon(root_seclabel) < 0) {
-                LOG(FATAL) << "Could not set SELinux context";
-            }
+    if (root_seclabel != nullptr) {
+        if (selinux_android_setcon(root_seclabel) < 0) {
+            LOG(FATAL) << "Could not set SELinux context";
         }
-        std::string error;
-        std::string local_name =
-            android::base::StringPrintf("tcp:%d", server_port);
-        if (install_listener(local_name, "*smartsocket*", nullptr, 0, nullptr, &error)) {
-            LOG(FATAL) << "Could not install *smartsocket* listener: " << error;
-        }
+    }
+    std::string error;
+    std::string local_name =
+        android::base::StringPrintf("tcp:%d", server_port);
+    if (install_listener(local_name, "*smartsocket*", nullptr, 0, nullptr, &error)) {
+        LOG(FATAL) << "Could not install *smartsocket* listener: " << error;
     }
 }
 
